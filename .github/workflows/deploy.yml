@@ -34,7 +34,7 @@ jobs:
         run: |
           az acr login --name "$ACR_NAME"
           IMAGE="$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }}"
-          docker build -t "$IMAGE" .
+          docker build --build-arg APP_VERSION="${GITHUB_SHA::7}" -t "$IMAGE" .
           docker push "$IMAGE"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 

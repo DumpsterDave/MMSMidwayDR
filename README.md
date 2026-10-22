@@ -4,8 +4,10 @@ MMS Midway DR Examples
 ## Container App demo
 
 A minimal Node.js app (no dependencies) that displays
-`This app is running on <NAME>`, where `<NAME>` comes from the
-`CONTAINER_APP_NAME` environment variable. Listens on port `8080`
+`This app is running on <NAME> (version <VERSION>)`, where `<NAME>` comes
+from the `CONTAINER_APP_NAME` environment variable and `<VERSION>` from
+`APP_VERSION`. The pipeline bakes `APP_VERSION` into the image as the short
+commit SHA (`dev` for local builds). Listens on port `8080`
 and exposes `/health` (GET and HEAD) for health probes.
 
 ### Run locally
