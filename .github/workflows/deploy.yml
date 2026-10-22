@@ -1,0 +1,88 @@
+name: Build and deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC login to Azure
+  contents: read
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  IMAGE_NAME: mms-midway-dr
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push image to ACR
+        id: push
+        run: |
+          az acr login --name "$ACR_NAME"
+          IMAGE="$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # a failure in one region shouldn't cancel the other
+      matrix:
+        include:
+          - target: primary
+            resource_group: ${{ vars.PRIMARY_RESOURCE_GROUP }}
+            app_name: ${{ vars.PRIMARY_CONTAINER_APP_NAME }}
+          - target: secondary
+            resource_group: ${{ vars.SECONDARY_RESOURCE_GROUP }}
+            app_name: ${{ vars.SECONDARY_CONTAINER_APP_NAME }}
+    name: deploy (${{ matrix.target }})
+    env:
+      RESOURCE_GROUP: ${{ matrix.resource_group }}
+      CONTAINER_APP_NAME: ${{ matrix.app_name }}
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - name: Skip if not configured
+        if: matrix.resource_group == '' || matrix.app_name == ''
+        run: echo "::notice::${{ matrix.target }} Container App variables not set; skipping deployment."
+
+      - name: Azure login (OIDC)
+        if: matrix.resource_group != '' && matrix.app_name != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Container App
+        if: matrix.resource_group != '' && matrix.app_name != ''
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$IMAGE" \
+            --set-env-vars CONTAINER_APP_NAME="$CONTAINER_APP_NAME"
+
+      - name: Show app URL
+        if: matrix.resource_group != '' && matrix.app_name != ''
+        run: |
+          FQDN=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "${{ matrix.target }} ($CONTAINER_APP_NAME): https://$FQDN" >> "$GITHUB_STEP_SUMMARY"
