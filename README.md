@@ -66,6 +66,6 @@ are required).
 | `false` (default) | Start the secondary app | Stop the primary app |
 | `true` | Start the primary app | Stop the secondary app |
 
-Step 1 waits (up to 5 minutes) for the started app's `/health` endpoint to
+Step 1 waits (up to 10 minutes) for the started app's `/health` endpoint to
 respond before step 2 runs, so both apps are never down at once. If it never
 becomes healthy, the workflow fails and the other app is left running.

@@ -18,6 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ARM_API_VERSION: "2026-07-01"
   # Failover: start secondary, stop primary. Failback: the reverse.
   START_RESOURCE_GROUP: ${{ inputs.FAILBACK && vars.PRIMARY_RESOURCE_GROUP || vars.SECONDARY_RESOURCE_GROUP }}
   START_APP_NAME: ${{ inputs.FAILBACK && vars.PRIMARY_CONTAINER_APP_NAME || vars.SECONDARY_CONTAINER_APP_NAME }}
@@ -50,22 +51,28 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # The Azure CLI has no containerapp start/stop commands, so call the ARM
+      # start/stop actions directly. Both are async (202), so poll for the result.
       - name: Start ${{ env.START_APP_NAME }}
         run: |
-          az containerapp start --name "$START_APP_NAME" --resource-group "$START_RESOURCE_GROUP"
+          APP_ID=$(az containerapp show \
+            --name "$START_APP_NAME" \
+            --resource-group "$START_RESOURCE_GROUP" \
+            --query id -o tsv)
+          az rest --method post --url "https://management.azure.com${APP_ID}/start?api-version=$ARM_API_VERSION"
 
           # Don't stop the other app until this one is actually serving
           FQDN=$(az containerapp show \
             --name "$START_APP_NAME" \
             --resource-group "$START_RESOURCE_GROUP" \
             --query properties.configuration.ingress.fqdn -o tsv)
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if curl -fsS "https://$FQDN/health"; then
               echo
               echo "Started $START_APP_NAME: https://$FQDN" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-            echo "Waiting for https://$FQDN/health ($i/30)..."
+            echo "Waiting for https://$FQDN/health ($i/60)..."
             sleep 10
           done
           echo "::error::$START_APP_NAME did not become healthy; leaving $STOP_APP_NAME running."
@@ -73,5 +80,22 @@ jobs:
 
       - name: Stop ${{ env.STOP_APP_NAME }}
         run: |
-          az containerapp stop --name "$STOP_APP_NAME" --resource-group "$STOP_RESOURCE_GROUP"
-          echo "Stopped $STOP_APP_NAME" >> "$GITHUB_STEP_SUMMARY"
+          APP_ID=$(az containerapp show \
+            --name "$STOP_APP_NAME" \
+            --resource-group "$STOP_RESOURCE_GROUP" \
+            --query id -o tsv)
+          az rest --method post --url "https://management.azure.com${APP_ID}/stop?api-version=$ARM_API_VERSION"
+
+          for i in $(seq 1 30); do
+            STATUS=$(az rest --method get \
+              --url "https://management.azure.com${APP_ID}?api-version=$ARM_API_VERSION" \
+              --query properties.runningStatus -o tsv)
+            if [ "$STATUS" = "Stopped" ]; then
+              echo "Stopped $STOP_APP_NAME" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Waiting for $STOP_APP_NAME to stop, status: $STATUS ($i/30)..."
+            sleep 10
+          done
+          echo "::error::$STOP_APP_NAME did not report Stopped within 5 minutes."
+          exit 1
