@@ -1,0 +1,77 @@
+name: Simulate DR
+
+on:
+  workflow_dispatch:
+    inputs:
+      FAILBACK:
+        description: "Fail back to the primary (start primary, stop secondary)"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # required for OIDC login to Azure
+  contents: read
+
+# Never run a failover and a failback at the same time
+concurrency:
+  group: dr-simulate
+  cancel-in-progress: false
+
+env:
+  # Failover: start secondary, stop primary. Failback: the reverse.
+  START_RESOURCE_GROUP: ${{ inputs.FAILBACK && vars.PRIMARY_RESOURCE_GROUP || vars.SECONDARY_RESOURCE_GROUP }}
+  START_APP_NAME: ${{ inputs.FAILBACK && vars.PRIMARY_CONTAINER_APP_NAME || vars.SECONDARY_CONTAINER_APP_NAME }}
+  STOP_RESOURCE_GROUP: ${{ inputs.FAILBACK && vars.SECONDARY_RESOURCE_GROUP || vars.PRIMARY_RESOURCE_GROUP }}
+  STOP_APP_NAME: ${{ inputs.FAILBACK && vars.SECONDARY_CONTAINER_APP_NAME || vars.PRIMARY_CONTAINER_APP_NAME }}
+
+jobs:
+  simulate:
+    name: ${{ inputs.FAILBACK && 'Failback to primary' || 'Failover to secondary' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check configuration
+        run: |
+          for v in PRIMARY_RESOURCE_GROUP PRIMARY_CONTAINER_APP_NAME SECONDARY_RESOURCE_GROUP SECONDARY_CONTAINER_APP_NAME; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Repository variable $v is not set; both primary and secondary apps are required."
+              exit 1
+            fi
+          done
+        env:
+          PRIMARY_RESOURCE_GROUP: ${{ vars.PRIMARY_RESOURCE_GROUP }}
+          PRIMARY_CONTAINER_APP_NAME: ${{ vars.PRIMARY_CONTAINER_APP_NAME }}
+          SECONDARY_RESOURCE_GROUP: ${{ vars.SECONDARY_RESOURCE_GROUP }}
+          SECONDARY_CONTAINER_APP_NAME: ${{ vars.SECONDARY_CONTAINER_APP_NAME }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start ${{ env.START_APP_NAME }}
+        run: |
+          az containerapp start --name "$START_APP_NAME" --resource-group "$START_RESOURCE_GROUP"
+
+          # Don't stop the other app until this one is actually serving
+          FQDN=$(az containerapp show \
+            --name "$START_APP_NAME" \
+            --resource-group "$START_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 30); do
+            if curl -fsS "https://$FQDN/health"; then
+              echo
+              echo "Started $START_APP_NAME: https://$FQDN" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Waiting for https://$FQDN/health ($i/30)..."
+            sleep 10
+          done
+          echo "::error::$START_APP_NAME did not become healthy; leaving $STOP_APP_NAME running."
+          exit 1
+
+      - name: Stop ${{ env.STOP_APP_NAME }}
+        run: |
+          az containerapp stop --name "$STOP_APP_NAME" --resource-group "$STOP_RESOURCE_GROUP"
+          echo "Stopped $STOP_APP_NAME" >> "$GITHUB_STEP_SUMMARY"

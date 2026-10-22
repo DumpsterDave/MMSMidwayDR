@@ -53,3 +53,19 @@ GitHub repository **variables**:
 | `PRIMARY_CONTAINER_APP_NAME` | Name of the primary Container App |
 | `SECONDARY_RESOURCE_GROUP` | Resource group of the secondary Container App |
 | `SECONDARY_CONTAINER_APP_NAME` | Name of the secondary Container App |
+
+### Simulating DR
+
+[.github/workflows/dr-simulate.yml](.github/workflows/dr-simulate.yml) is run
+manually from the Actions tab and uses the same secrets and `PRIMARY_*` /
+`SECONDARY_*` variables as the deployment pipeline (all four app variables
+are required).
+
+| `FAILBACK` | Step 1 | Step 2 |
+| --- | --- | --- |
+| `false` (default) | Start the secondary app | Stop the primary app |
+| `true` | Start the primary app | Stop the secondary app |
+
+Step 1 waits (up to 5 minutes) for the started app's `/health` endpoint to
+respond before step 2 runs, so both apps are never down at once. If it never
+becomes healthy, the workflow fails and the other app is left running.
